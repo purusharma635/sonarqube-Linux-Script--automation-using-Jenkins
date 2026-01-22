@@ -113,4 +113,4 @@ sudo systemctl enable sonarqube
 sudo systemctl restart sonarqube
 
 echo "===== SonarQube Installed Successfully ====="
-echo "Access: http://13.234.118.180:9000"
+echo "Access: http://13.233.174.189:9000"
