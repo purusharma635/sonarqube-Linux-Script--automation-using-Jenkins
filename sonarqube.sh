@@ -1,67 +1,116 @@
 #!/bin/bash
 
-echo "======================================"
-echo " SonarQube + PostgreSQL Setup Started "
-echo "======================================"
+echo "===== SonarQube Installation Started ====="
+
+SONAR_VERSION="9.9.3.79811"
+SONAR_USER="sonar"
+SONAR_DIR="/opt/sonarqube"
+SONAR_DB="sonarqube"
+SONAR_DB_USER="sonar"
+SONAR_DB_PASS="sonar123"
 
 # Update system
 sudo apt update -y
 
-# Install Java
-echo "Installing Java..."
-sudo apt install openjdk-17-jdk -y
+# Install dependencies
+sudo apt install -y openjdk-17-jdk unzip wget postgresql postgresql-contrib
 
-# Install PostgreSQL
-echo "Installing PostgreSQL..."
-sudo apt install postgresql postgresql-contrib -y
+# ---------------------------
+# Kernel parameter (ONLY required one)
+# ---------------------------
+sudo sysctl -w vm.max_map_count=524288
 
-# Start and enable PostgreSQL
-sudo systemctl start postgresql
+if ! grep -q "vm.max_map_count" /etc/sysctl.conf; then
+  echo "vm.max_map_count=524288" | sudo tee -a /etc/sysctl.conf
+fi
+
+# ---------------------------
+# PostgreSQL setup
+# ---------------------------
 sudo systemctl enable postgresql
+sudo systemctl start postgresql
 
-# Create SonarQube DB & User
-echo "Configuring PostgreSQL for SonarQube..."
 sudo -u postgres psql <<EOF
-CREATE DATABASE sonarqube;
-CREATE USER sonar WITH ENCRYPTED PASSWORD 'sonar123';
-GRANT ALL PRIVILEGES ON DATABASE sonarqube TO sonar;
+DO \$\$
+BEGIN
+   IF NOT EXISTS (SELECT FROM pg_database WHERE datname = '$SONAR_DB') THEN
+      CREATE DATABASE $SONAR_DB;
+   END IF;
+END
+\$\$;
+
+DO \$\$
+BEGIN
+   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$SONAR_DB_USER') THEN
+      CREATE USER $SONAR_DB_USER WITH PASSWORD '$SONAR_DB_PASS';
+   END IF;
+END
+\$\$;
+
+ALTER DATABASE $SONAR_DB OWNER TO $SONAR_DB_USER;
+GRANT ALL PRIVILEGES ON DATABASE $SONAR_DB TO $SONAR_DB_USER;
 EOF
 
-# Create sonar user
-echo "Creating sonar system user..."
-sudo useradd -m -s /bin/bash sonar
+# ---------------------------
+# Create sonar user safely
+# ---------------------------
+if ! id sonar &>/dev/null; then
+  sudo useradd -r -m -d /opt/sonarqube -s /bin/bash sonar
+fi
 
-# Download SonarQube
-cd /opt
-sudo wget https://binaries.sonarsource.com/Distribution/sonarqube/sonarqube-9.9.3.79811.zip
+# ---------------------------
+# Install SonarQube
+# ---------------------------
+cd /opt || exit 1
 
-# Install unzip
-sudo apt install unzip -y
+if [ ! -d "$SONAR_DIR" ]; then
+  sudo wget https://binaries.sonarsource.com/Distribution/sonarqube/sonarqube-${SONAR_VERSION}.zip
+  sudo unzip sonarqube-${SONAR_VERSION}.zip
+  sudo mv sonarqube-${SONAR_VERSION} sonarqube
+fi
 
-# Extract SonarQube
-sudo unzip sonarqube-9.9.3.79811.zip
-sudo mv sonarqube-9.9.3.79811 sonarqube
+sudo chown -R sonar:sonar $SONAR_DIR
 
-# Set ownership
-sudo chown -R sonar:sonar /opt/sonarqube
-sudo chmod -R 755 /opt/sonarqube
+# ---------------------------
+# Configure SonarQube
+# ---------------------------
+sudo tee $SONAR_DIR/conf/sonar.properties <<EOF
+sonar.jdbc.username=$SONAR_DB_USER
+sonar.jdbc.password=$SONAR_DB_PASS
+sonar.jdbc.url=jdbc:postgresql://localhost/$SONAR_DB
+sonar.web.port=9000
+EOF
 
-# Configure SonarQube DB
-echo "Configuring SonarQube database..."
-sudo sed -i "s|#sonar.jdbc.username=|sonar.jdbc.username=sonar|" /opt/sonarqube/conf/sonar.properties
-sudo sed -i "s|#sonar.jdbc.password=|sonar.jdbc.password=sonar123|" /opt/sonarqube/conf/sonar.properties
-sudo sed -i "s|#sonar.jdbc.url=jdbc:postgresql://localhost/sonarqube|sonar.jdbc.url=jdbc:postgresql://localhost/sonarqube|" /opt/sonarqube/conf/sonar.properties
+# ---------------------------
+# systemd service (SAFE LIMITS)
+# ---------------------------
+sudo tee /etc/systemd/system/sonarqube.service <<EOF
+[Unit]
+Description=SonarQube
+After=network.target postgresql.service
 
-# Kernel parameters (required)
-echo "Setting vm.max_map_count..."
-sudo sysctl -w vm.max_map_count=524288
-sudo sysctl -w fs.file-max=131072
+[Service]
+Type=forking
+ExecStart=$SONAR_DIR/bin/linux-x86-64/sonar.sh start
+ExecStop=$SONAR_DIR/bin/linux-x86-64/sonar.sh stop
+User=sonar
+Group=sonar
+Restart=always
 
+# SAFE limits (service-level only)
+LimitNOFILE=131072
+LimitNPROC=8192
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# ---------------------------
 # Start SonarQube
-echo "Starting SonarQube..."
-sudo -u sonar /opt/sonarqube/bin/linux-x86-64/sonar.sh start
+# ---------------------------
+sudo systemctl daemon-reload
+sudo systemctl enable sonarqube
+sudo systemctl restart sonarqube
 
-echo "======================================"
-echo " SonarQube Started Successfully "
-echo " URL: http://13.233.174.189:9000 "
-echo "======================================"
+echo "===== SonarQube Installed Successfully ====="
+echo "Access: http://13.234.118.180:9000"
